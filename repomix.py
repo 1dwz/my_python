@@ -1,4 +1,12 @@
-# --- repomix.py ---
+"""
+RepoMixer Component
+
+This module provides a utility to traverse a repository, filter files according to rules,
+and synthesize them into a single text file for AI context. It includes robust
+file handling, .gitignore compatibility, and defensive programming practices.
+"""
+# Dependencies: gitignore-parser
+
 import argparse
 import logging
 import sys
@@ -10,7 +18,10 @@ from typing import Final, Dict, Callable, Iterator
 # which is non-trivial to implement correctly.
 # Installation: pip install gitignore-parser
 try:
-    from gitignore_parser import parse_gitignore
+    # --- FIX START ---
+    # Import the internal function to handle file streams directly
+    from gitignore_parser import _parse_gitignore_lines
+    # --- FIX END ---
 except ImportError:
     print("Error: 'gitignore-parser' is not installed. Please run 'pip install gitignore-parser'", file=sys.stderr)
     sys.exit(1)
@@ -41,9 +52,11 @@ class RepoMixer:
         """
         Initializes the RepoMixer with specified paths.
 
-        Args:
-            root_dir: The absolute path to the repository's root directory.
-            output_file: The absolute path to the target output file.
+        :param root_dir: The absolute path to the repository's root directory.
+        :type root_dir: Path
+        :param output_file: The absolute path to the target output file.
+        :type output_file: Path
+        :raises TypeError: If root_dir or output_file are not Path objects.
         """
         if not isinstance(root_dir, Path) or not isinstance(output_file, Path):
             raise TypeError("root_dir and output_file must be Path objects.")
@@ -53,20 +66,39 @@ class RepoMixer:
         self.ignore_matcher = self._load_ignore_rules()
         self.file_count = 0
 
+    # --- FIX START: This entire method is replaced ---
     def _load_ignore_rules(self) -> Callable[[Path], bool]:
-        """Loads .gitignore rules and returns a matching function."""
+        """
+        Loads .gitignore rules and returns a matching function.
+        This version manually opens the .gitignore file with UTF-8 encoding
+        to prevent UnicodeDecodeError on systems with different default encodings.
+        """
         gitignore_path = self.root_dir / ".gitignore"
         if gitignore_path.is_file():
-            logging.info(f"Applying .gitignore rules from: {gitignore_path}")
-            return parse_gitignore(gitignore_path, base_dir=self.root_dir)
+            try:
+                logging.info(f"Applying .gitignore rules from: {gitignore_path}")
+                # Manually open the file with UTF-8 encoding
+                with gitignore_path.open("r", encoding="utf-8", errors="ignore") as f:
+                    # Pass the file handle to the internal parser function
+                    return _parse_gitignore_lines(f, gitignore_path, base_dir=self.root_dir)
+            except (IOError, UnicodeDecodeError) as e:
+                logging.error(f"Failed to read or parse .gitignore file at {gitignore_path}: {e}. "
+                              "Proceeding without .gitignore rules.")
+                return lambda p: False
         logging.warning("No .gitignore file found. Using default ignore rules only.")
         return lambda p: False
+    # --- FIX END ---
 
     @staticmethod
     def _is_binary(filepath: Path) -> bool:
         """
-        Checks if a file is likely binary by searching for null bytes.
-        Returns False if the file is unreadable.
+        Checks if a file is likely binary by searching for null bytes within its
+        initial segment. Returns False if the file is unreadable.
+
+        :param filepath: The path to the file to check.
+        :type filepath: Path
+        :return: True if the file is likely binary, False otherwise.
+        :rtype: bool
         """
         try:
             with filepath.open("rb") as f:
@@ -77,7 +109,14 @@ class RepoMixer:
 
     @staticmethod
     def _get_lang(filename: Path) -> str:
-        """Determines the Markdown language identifier from a filename."""
+        """
+        Determines the Markdown language identifier from a filename's extension.
+
+        :param filename: The path to the file.
+        :type filename: Path
+        :return: The language identifier string (e.g., "python", "javascript"), or an empty string if unknown.
+        :rtype: str
+        """
         name = filename.name.lower()
         if "dockerfile" in name:
             return "dockerfile"
@@ -88,6 +127,10 @@ class RepoMixer:
         Walks the repository, yielding eligible files while respecting ignore
         rules to prune directory traversal efficiently. This is a non-recursive
         implementation to prevent stack depth issues.
+
+        :yield: Path objects for eligible files.
+        :rtype: Iterator[Path]
+        :raises OSError: If a directory cannot be accessed during traversal.
         """
         dirs_to_visit = [self.root_dir]
 
@@ -99,6 +142,7 @@ class RepoMixer:
                     if item_path == self.output_file or item_path == self.script_file:
                         continue
 
+                    # Convert to POSIX path for consistent matching against ignore patterns
                     relative_path_str = str(item_path.relative_to(self.root_dir)).replace('\\', '/')
                     if relative_path_str.startswith(DEFAULT_IGNORE_PATTERNS):
                         continue
@@ -118,11 +162,17 @@ class RepoMixer:
     def run(self) -> None:
         """
         Executes the main logic to generate the repository mix file.
+
+        This method traverses the repository, filters files, reads their content
+        with robust encoding handling, and writes them to the specified output file.
+
+        :raises IOError: If the output file cannot be written to.
         """
         logging.info("Starting repository processing...")
         logging.info(f"Project Root (Base for all paths): {self.root_dir}")
 
         try:
+            # Use errors="ignore" for the output file in case of any unexpected encoding issues
             with self.output_file.open("w", encoding="utf-8", errors="ignore") as f_out:
                 f_out.write(f"# Repository Mix Context\n")
                 f_out.write(f"# Root Directory (Absolute Path): {self.root_dir}\n")
@@ -139,6 +189,7 @@ class RepoMixer:
                         else:
                             lang = self._get_lang(file_path)
                             f_out.write(f"```{lang}\n")
+                            # Use errors="ignore" for robust reading of source files
                             content = file_path.read_text(encoding="utf-8", errors="ignore")
                             f_out.write(content.strip() + "\n")
                             f_out.write("```\n\n")
@@ -157,7 +208,12 @@ class RepoMixer:
 # --- Execution Entrypoint ---
 
 def main() -> None:
-    """Parses command-line arguments and initiates the RepoMixer."""
+    """
+    Parses command-line arguments and initiates the RepoMixer.
+
+    This function sets up logging, validates input paths, and handles
+    the overall execution flow of the RepoMixer.
+    """
     parser = argparse.ArgumentParser(
         description="Synthesizes a code repository into a single text file for AI context, respecting .gitignore.",
         formatter_class=argparse.RawTextHelpFormatter
@@ -195,6 +251,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-# --- requirements.txt ---
-# gitignore-parser>=0.1.9
