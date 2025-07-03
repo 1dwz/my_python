@@ -6,7 +6,7 @@ import ctypes
 import argparse
 import logging
 
-# Setup basic logging
+# Setup basic logging for silent background operation
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def is_admin():
@@ -31,370 +31,171 @@ def create_parent_dirs(file_path):
     """Ensure parent directories for a given file_path exist."""
     parent_dir = os.path.dirname(file_path)
     if parent_dir and not os.path.exists(parent_dir):
-        logging.info(f"Parent directory '{parent_dir}' does not exist. Creating it.")
         try:
             os.makedirs(parent_dir, exist_ok=True)
             logging.info(f"Successfully created parent directory '{parent_dir}'.")
         except OSError as e:
             raise OSError(f"Failed to create parent directory '{parent_dir}': {e}")
-    elif parent_dir:
-        logging.debug(f"Parent directory '{parent_dir}' already exists.")
 
-def copy_directory_contents_robust(source_dir, dest_dir):
-    """
-    Robustly copies contents of source_dir to dest_dir.
-    dest_dir will be created if it doesn't exist.
-    If dest_dir exists, contents will be merged/overwritten carefully.
-    遇到被占用文件（WinError 32）时跳过并记录。
-    返回失败文件列表。
-    """
-    logging.info(f"Copying contents from '{source_dir}' to '{dest_dir}'...")
-    failed_files = []
+def remove_path(path):
+    """Safely remove a path, whether it's a file, directory, or link."""
     try:
-        if not os.path.exists(dest_dir):
-            os.makedirs(dest_dir)
-            logging.info(f"Created destination directory '{dest_dir}'.")
-        elif not os.path.isdir(dest_dir):
-            raise FileExistsError(f"Destination path '{dest_dir}' exists but is not a directory.")
-
-        for item_name in os.listdir(source_dir):
-            source_item_path = os.path.join(source_dir, item_name)
-            dest_item_path = os.path.join(dest_dir, item_name)
-
-            try:
-                if os.path.isdir(source_item_path):
-                    if os.path.isfile(dest_item_path):
-                        logging.warning(f"Destination item '{dest_item_path}' is a file, removing to copy directory.")
-                        os.remove(dest_item_path)
-                    shutil.copytree(source_item_path, dest_item_path, symlinks=True, dirs_exist_ok=True)
-                elif os.path.isfile(source_item_path):
-                    if os.path.isdir(dest_item_path):
-                        logging.warning(f"Destination item '{dest_item_path}' is a directory, removing to copy file.")
-                        shutil.rmtree(dest_item_path)
-                    shutil.copy2(source_item_path, dest_item_path)
-                elif os.path.islink(source_item_path):
-                    if os.path.lexists(dest_item_path):
-                        if os.path.islink(dest_item_path):
-                            os.unlink(dest_item_path)
-                        elif os.path.isdir(dest_item_path):
-                            shutil.rmtree(dest_item_path)
-                        else:
-                            os.remove(dest_item_path)
-                    link_target = os.readlink(source_item_path)
-                    os.symlink(link_target, dest_item_path)
-                    logging.info(f"Copied symlink '{source_item_path}' to '{dest_item_path}' -> '{link_target}'")
-                else:
-                    logging.warning(f"Skipping unsupported file type: '{source_item_path}'")
-            except Exception as e:
-                # 处理WinError 32
-                if hasattr(e, 'winerror') and e.winerror == 32:
-                    logging.error(f"File in use, skipped: '{source_item_path}' (WinError 32: {e})")
-                    failed_files.append(source_item_path)
-                    continue
-                else:
-                    logging.error(f"Failed to copy '{source_item_path}': {e}")
-                    failed_files.append(source_item_path)
-                    continue
-
-        logging.info(f"Successfully copied contents to '{dest_dir}'.")
-        return failed_files
-    except Exception as e:
-        raise Exception(f"Failed to copy directory contents: {e}")
-
-
-def validate_copy_basic(source_dir, dest_dir):
-    """Basic validation: compare number of items and total size."""
-    logging.info(f"Performing basic validation of copy from '{source_dir}' to '{dest_dir}'...")
-    try:
-        source_items_count = 0
-        source_total_size = 0
-        for root, dirs, files in os.walk(source_dir):
-            source_items_count += len(dirs) + len(files)
-            for name in files:
-                try:
-                    source_total_size += os.path.getsize(os.path.join(root, name))
-                except OSError: # Handle potential errors with symlinks or special files
-                    pass
-
-
-        dest_items_count = 0
-        dest_total_size = 0
-        for root, dirs, files in os.walk(dest_dir):
-            dest_items_count += len(dirs) + len(files)
-            for name in files:
-                try:
-                    dest_total_size += os.path.getsize(os.path.join(root, name))
-                except OSError:
-                    pass
-
-        if source_items_count == dest_items_count and source_total_size == dest_total_size:
-            logging.info(f"Basic validation passed: Items: {source_items_count}, Size: {source_total_size} bytes.")
-            return True
-        else:
-            logging.warning(f"Basic validation failed: Source (Items: {source_items_count}, Size: {source_total_size}) vs Dest (Items: {dest_items_count}, Size: {dest_total_size})")
-            return False
-    except Exception as e:
-        logging.error(f"Error during basic validation: {e}")
-        return False
-
-def remove_directory_recursive(dir_path):
-    """Recursively remove a directory and its contents."""
-    logging.info(f"Removing directory '{dir_path}'...")
-    try:
-        shutil.rmtree(dir_path)
-        logging.info(f"Successfully removed directory '{dir_path}'.")
+        if os.path.islink(path):
+            os.unlink(path)
+            logging.info(f"Removed existing symbolic link at '{path}'.")
+        elif os.path.isdir(path):
+            shutil.rmtree(path)
+            logging.info(f"Removed existing directory at '{path}'.")
+        elif os.path.isfile(path):
+            os.remove(path)
+            logging.info(f"Removed existing file at '{path}'.")
     except OSError as e:
-        raise OSError(f"Failed to remove directory '{dir_path}': {e}")
+        raise OSError(f"Failed to remove existing item at '{path}': {e}")
 
 def create_directory_symlink(link_name, target_path):
-    """Create a directory symbolic link."""
+    """Create a directory symbolic link, ensuring target is an absolute path."""
     logging.info(f"Creating directory symbolic link: '{link_name}' -> '{target_path}'")
     system = platform.system().lower()
+    
+    # Ensure link_name path is clear before creating
+    if os.path.lexists(link_name):
+        logging.warning(f"Path '{link_name}' already exists. It will be removed before creating the new link.")
+        remove_path(link_name)
+
+    # Ensure parent directory for the link exists
+    create_parent_dirs(link_name)
+
     try:
-        if os.path.lexists(link_name): # Use lexists to check if link_name itself exists (could be a broken link)
-            logging.warning(f"Path '{link_name}' already exists. Attempting to remove before creating symlink.")
-            if os.path.islink(link_name):
-                os.unlink(link_name)
-            elif os.path.isdir(link_name): # Should not happen if original was deleted
-                shutil.rmtree(link_name)
-            else: # A file
-                os.remove(link_name)
-            logging.info(f"Removed existing path at '{link_name}'.")
-
-
         if system == "windows":
+            # On Windows, mklink requires an absolute path for reliability.
             cmd = ['cmd', '/c', 'mklink', '/D', link_name, target_path]
-            logging.debug(f"Executing command: {' '.join(cmd)}")
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True, shell=False) # shell=False is safer
-            logging.info(f"Windows mklink output: {result.stdout.strip()}")
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True, shell=False)
+            logging.debug(f"Windows mklink output: {result.stdout.strip()}")
         else: # Linux/macOS
             os.symlink(target_path, link_name, target_is_directory=True)
+        
         logging.info(f"Successfully created symbolic link.")
     except subprocess.CalledProcessError as e:
-        raise Exception(f"Failed to create symbolic link using mklink. Return code: {e.returncode}\nError: {e.stderr.strip()}\nOutput: {e.stdout.strip()}")
+        raise Exception(f"Failed to create symbolic link using mklink. Return code: {e.returncode}\nError: {e.stderr.strip()}")
     except OSError as e:
         raise OSError(f"Failed to create symbolic link: {e}")
 
-
-def migrate_and_link_directory(original_data_path, new_data_storage_path, skip_validation=False):
+def align_paths_as_link_and_target(link_path_str, data_path_str):
     """
-    Migrates data from original_data_path to new_data_storage_path,
-    deletes the original, and creates a symbolic link.
-    If original_data_path does not exist, it attempts to create the link directly,
-    assuming new_data_storage_path exists and contains the data.
+    Ensures that link_path is a symbolic link pointing to data_path.
+    The data at data_path has the highest priority.
+
+    Logic:
+    1.  If data_path exists as a directory, it's the source of truth. Any conflicting
+        item at link_path will be removed.
+    2.  If data_path does not exist, the script checks if link_path is a directory.
+        If so, it's moved to become the new data_path.
+    3.  Finally, a symbolic link is created from link_path to data_path.
     """
-    logging.info(f"Starting migration and link process:")
-    logging.info(f"  Original path: '{original_data_path}'")
-    logging.info(f"  New storage path: '{new_data_storage_path}'")
+    link_path = normalize_path(link_path_str)
+    data_path = normalize_path(data_path_str)
 
-    # --- 新增：如果原路径已是符号链接，直接提示并终止 ---
-    norm_orig_path = normalize_path(original_data_path)
-    norm_new_storage_path = normalize_path(new_data_storage_path)
-    if os.path.islink(norm_orig_path):
-        link_target = os.readlink(norm_orig_path)
-        # 统一处理 Windows 下的 \?\ 前缀
-        if link_target.startswith('\\\\?\\') or link_target.startswith('\\?\\'):
-            link_target_clean = link_target.replace('\\\\?\\', '').replace('\\?\\', '')
-        else:
-            link_target_clean = link_target
-        link_target_clean = os.path.abspath(link_target_clean)
-        logging.info(f"原路径 '{norm_orig_path}' 已经是符号链接，指向: '{link_target}'。无需迁移。")
-        # 检查目标是否一致
-        if link_target_clean == norm_new_storage_path:
-            logging.info("原路径已经是符号链接，且目标与预期一致，无需操作。")
-            return
-        else:
-            logging.warning(f"原路径 '{norm_orig_path}' 已经是符号链接，但目标与预期不一致。当前指向: '{link_target}'，预期: '{norm_new_storage_path}'。将删除并重建。")
-            # 继续执行，让 create_directory_symlink 处理删除和重建
-
-    # --- 0. Preparation ---
-    logging.info(f"  Normalized original path: '{norm_orig_path}'")
-    logging.info(f"  Normalized new storage path: '{norm_new_storage_path}'")
-
-    original_path_existed_as_dir = os.path.isdir(norm_orig_path)
-
-    # --- 1. Basic Validation ---
-    if norm_orig_path == norm_new_storage_path:
-        raise ValueError("Error: Original data path and new data storage path cannot be the same.")
-
+    logging.info("--- Starting Alignment Process ---")
+    logging.info(f"Desired Link Path: '{link_path}'")
+    logging.info(f"Desired Data Path: '{data_path}' (Data here has priority)")
+    
+    # --- 0. Pre-flight Checks ---
+    if link_path == data_path:
+        raise ValueError("Link path and data path cannot be the same.")
     if platform.system().lower() == "windows" and not is_admin():
-        raise PermissionError("Error: Administrator privileges are required to create directory symbolic links on Windows.")
-    # (Non-Windows admin check removed for brevity, can be added back if strictness is needed)
+        raise PermissionError("Administrator privileges are required on Windows.")
 
-    # --- 2. Handle New Data Storage Path's Parent Directory ---
-    try:
-        create_parent_dirs(norm_new_storage_path)
-        create_parent_dirs(norm_orig_path)
-    except OSError as e:
-        raise OSError(f"Error preparing parent directory for new storage path: {e}")
-
-    # --- 3. Handle New Data Storage Path Itself ---
-    if os.path.exists(norm_new_storage_path) and not os.path.isdir(norm_new_storage_path):
-        raise FileExistsError(f"Error: New data storage path '{norm_new_storage_path}' exists but is not a directory.")
-    # If new storage path doesn't exist, it will be created by copy_directory_contents_robust
-    # or needs to exist if original_path_existed_as_dir is False.
-
-    perform_data_copy = False
-    if original_path_existed_as_dir and not os.path.exists(norm_new_storage_path):
-        perform_data_copy = True
-        logging.info(f"Original data directory '{norm_orig_path}' exists and new storage path '{norm_new_storage_path}' does not. Proceeding with copy and then delete.")
-    elif original_path_existed_as_dir and os.path.exists(norm_new_storage_path):
-        logging.info(f"Original data directory '{norm_orig_path}' exists and new storage path '{norm_new_storage_path}' already exists. Skipping data copy, proceeding with deletion of original.")
-    else: # original_path_existed_as_dir is False
-        logging.info(f"Original data path '{norm_orig_path}' does not exist or is not a directory. Skipping data copy and original directory deletion steps.")
-
-    if perform_data_copy:
-        # --- 4. Copy/Sync Data ---
+    # --- 1. Check if the system is already in the desired state ---
+    if os.path.islink(link_path):
         try:
-            failed_files = copy_directory_contents_robust(norm_orig_path, norm_new_storage_path)
-        except Exception as e:
-            logging.error(f"Data copy failed. Original data at '{norm_orig_path}' has NOT been deleted.")
-            raise
+            target = os.readlink(link_path)
+            # Resolve relative links for accurate comparison
+            abs_target = normalize_path(os.path.join(os.path.dirname(link_path), target))
+            if abs_target == data_path:
+                logging.info("System is already in the desired state. No action needed.")
+                logging.info("--- Alignment Process Finished Successfully ---")
+                return
+        except OSError as e:
+            logging.warning(f"Could not read existing link at '{link_path}', will proceed to fix it. Error: {e}")
 
-        if failed_files:
-            logging.error(f"以下文件因被占用或其他原因未能复制：")
-            for f in failed_files:
-                logging.error(f"  {f}")
-            logging.error("请关闭相关程序或手动处理这些文件后重试。原始目录未被删除，迁移中止。")
-            raise Exception("部分文件复制失败，操作中止。")
-
-        # --- 5. (Optional but recommended) Validate Copy ---
-        if not skip_validation:
-            if not validate_copy_basic(norm_orig_path, norm_new_storage_path):
-                logging.error("Data validation failed. Contents of source and destination may differ.")
-                raise Exception("Operation aborted due to data validation failure. Original data has NOT been deleted.")
-            logging.info("Data copy validation successful.")
+    # --- 2. Establish the authoritative data_path ---
+    # The data at data_path has priority.
+    if os.path.isdir(data_path):
+        logging.info(f"Authoritative data directory found at '{data_path}'. It will be used as the target.")
+    elif os.path.exists(data_path):
+        # Path exists but is not a directory (e.g., a file), which is a critical conflict.
+        raise FileExistsError(f"Data path '{data_path}' exists but is not a directory. Manual intervention required.")
+    else:
+        # Data path does not exist. We need to find or create the data.
+        create_parent_dirs(data_path)
+        if os.path.isdir(link_path):
+            logging.info(f"Data path '{data_path}' does not exist. Moving data from '{link_path}'.")
+            try:
+                shutil.move(link_path, data_path)
+                logging.info(f"Successfully moved '{link_path}' to '{data_path}'.")
+            except Exception as e:
+                raise Exception(f"Failed to move data from '{link_path}' to '{data_path}': {e}")
         else:
-            logging.info("Skipping data copy validation as per user request.")
+            logging.info(f"Data path '{data_path}' does not exist and no source data found at '{link_path}'. Creating empty data directory.")
+            os.makedirs(data_path)
 
-    # --- 6. Delete Original Data Path (only if original_path_existed_as_dir was true) ---
-    if original_path_existed_as_dir:
-        try:
-            remove_directory_recursive(norm_orig_path)
-            if os.path.exists(norm_orig_path): # Double check
-                 raise OSError(f"Error: Directory '{norm_orig_path}' still exists after attempting removal.")
-        except OSError as e:
-            logging.error(f"Failed to delete original data directory '{norm_orig_path}'. "
-                          f"Link creation will be skipped. Error: {e}")
-            raise
-
-    # Ensure new storage path exists if it wasn't created by copy_directory_contents_robust
-    # This block is needed if original_path_existed_as_dir is False, or if original_path_existed_as_dir is True
-    # but new_data_storage_path already existed (so no copy happened).
-    if not perform_data_copy and not os.path.isdir(norm_new_storage_path):
-        logging.info(f"Target directory '{norm_new_storage_path}' does not exist. Creating it...")
-        try:
-            os.makedirs(norm_new_storage_path, exist_ok=True)
-            logging.info(f"Successfully created target directory: '{norm_new_storage_path}'")
-        except OSError as e:
-            raise OSError(f"Failed to create target directory '{norm_new_storage_path}': {e}")
-
-    # 确保源目录的父目录存在
+    # --- 3. Create the symbolic link ---
+    # At this point, data_path is guaranteed to be a directory.
+    # The create_directory_symlink function will handle removing any conflicting
+    # file, directory, or old link at link_path.
     try:
-        parent_dir = os.path.dirname(norm_orig_path)
-        if parent_dir and not os.path.exists(parent_dir):
-            logging.info(f"Creating parent directory for symbolic link: '{parent_dir}'")
-            os.makedirs(parent_dir, exist_ok=True)
-    except OSError as e:
-        raise OSError(f"Failed to create parent directory for symbolic link: {e}")
-
-
-    # --- 7. Create Symbolic Link ---
-    try:
-        # Ensure target_path for symlink is absolute for mklink reliability
-        abs_target_for_link = normalize_path(norm_new_storage_path)
-        create_directory_symlink(norm_orig_path, abs_target_for_link) # Link name is the original path
+        create_directory_symlink(link_path, data_path)
     except Exception as e:
-        log_message = (f"CRITICAL ERROR: Failed to create symbolic link '{norm_orig_path}' -> '{abs_target_for_link}'. "
-                       f"Error: {e}")
-        if original_path_existed_as_dir:
-            log_message += (f"\nOriginal data was DELETED from '{norm_orig_path}' and COPIED to '{abs_target_for_link}', "
-                            f"but the link was NOT created. MANUAL INTERVENTION REQUIRED.")
-        else:
-            log_message += (f"\nAttempted to create link because original path did not exist. "
-                            f"MANUAL INTERVENTION REQUIRED to ensure link is correct or target exists.")
+        log_message = (f"CRITICAL ERROR: Failed to create symbolic link '{link_path}' -> '{data_path}'.\n"
+                       f"Error: {e}\n"
+                       f"The data should be safe at '{data_path}', but the link is missing. "
+                       "MANUAL INTERVENTION REQUIRED to create the link.")
         logging.critical(log_message)
         raise
 
-    # --- 8. Validate Symbolic Link ---
-    if not os.path.lexists(norm_orig_path): # Use lexists for links
-        raise FileNotFoundError(f"Validation Error: Symbolic link '{norm_orig_path}' not found after creation attempt.")
-    if not os.path.islink(norm_orig_path):
-        raise Exception(f"Validation Error: Path '{norm_orig_path}' exists but is not a symbolic link.")
-
-    try:
-        link_target_raw = os.readlink(norm_orig_path)
-        # On Windows, os.readlink for a directory symlink might return a path like '\\??\\C:\\Target'
-        # or a relative path. We need to normalize it carefully.
-        # If link_target_raw is already absolute and normalized, normpath is fine.
-        # If it's relative, it's relative to the link's location.
-        if platform.system().lower() == "windows" and link_target_raw.startswith("\\??\\"):
-            link_target_clean = link_target_raw[4:]
-        else:
-            link_target_clean = link_target_raw
-
-        if not os.path.isabs(link_target_clean):
-            # Resolve relative to the link's parent directory
-            link_parent_dir = os.path.dirname(norm_orig_path)
-            abs_link_target = normalize_path(os.path.join(link_parent_dir, link_target_clean))
-        else:
-            abs_link_target = normalize_path(link_target_clean)
-
-
-        if abs_link_target != norm_new_storage_path:
-            raise ValueError(f"Validation Error: Symbolic link '{norm_orig_path}' points to '{abs_link_target}' "
-                             f"(raw: '{link_target_raw}') instead of the expected '{norm_new_storage_path}'.")
-        logging.info(f"Symbolic link validation successful: '{norm_orig_path}' -> '{abs_link_target}'")
-    except OSError as e:
-        raise OSError(f"Validation Error: Could not read or validate symbolic link '{norm_orig_path}': {e}")
-
-
-    logging.info("----------------------------------------------------")
-    logging.info("Operation completed successfully!")
-    if original_path_existed_as_dir:
-        logging.info(f"  Data migrated from: '{original_data_path}'")
-        logging.info(f"  To new storage:   '{new_data_storage_path}'")
-        logging.info(f"  Original path '{original_data_path}' (formerly a directory) is now a symbolic link.")
-    else:
-        logging.info(f"  Symbolic link created: '{original_data_path}' -> '{new_data_storage_path}'")
-        logging.info(f"  (Original path did not exist as a directory prior to this operation).")
-    logging.info("----------------------------------------------------")
+    # --- 4. Final Validation ---
+    if not os.path.islink(link_path):
+        raise Exception(f"Validation Failed: Path '{link_path}' was not created as a symbolic link.")
+    
+    logging.info("--- Alignment Process Finished Successfully ---")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Migrates a directory to a new location, deletes the original, and creates a symbolic link. If the original directory does not exist, it attempts to create the link directly to the new location (which must exist).",
+        description="Ensures a specific path is a symbolic link to a data directory. The data in the target directory (data_path) always has the highest priority.",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
-Examples:
-  Windows (run as Administrator):
-    python script_name.py "C:\\Users\\YourUser\\AppData\\Local\\SomeApp" "D:\\AppDataBackup\\SomeApp"
-    python script_name.py "C:\\BrokenLinkLocation" "D:\\ActualDataLocation" --skip-validation (if original doesn't exist)
+This script operates based on a simple, powerful rule: the data at 'data_path' is the source of truth.
 
-  Linux/macOS:
-    python3 script_name.py "/home/user/my_large_data" "/mnt/external_drive/my_large_data_backup"
+Scenarios:
+1. If 'data_path' exists:
+   Any existing item at 'link_path' (dir, file, or old link) will be REMOVED.
+   A new symbolic link will be created from 'link_path' to 'data_path'.
 
-WARNING: This script performs destructive operations (deleting the original directory if it exists).
-Ensure you have backups and understand the consequences before running.
-Administrator/root privileges are typically required for creating directory symbolic links.
+2. If 'data_path' does NOT exist:
+   a) If 'link_path' is a directory, it will be MOVED to become the new 'data_path'.
+   b) Otherwise, an empty directory will be created at 'data_path'.
+   Then, the symbolic link will be created.
+
+Examples (run as Administrator on Windows):
+  # Move Docker data from C: to D: (assuming D:\\DockerData doesn't exist yet)
+  python mklink_tool.py "C:\\ProgramData\\Docker" "D:\\DockerData"
+
+  # Correct a link for an app, trusting the data on D: is correct
+  python mklink_tool.py "C:\\Users\\User\\AppData\\SomeApp" "D:\\Backups\\SomeApp"
+
+WARNING: This script can perform destructive operations (removing the item at 'link_path').
+It is designed for automated, non-interactive execution.
 """
     )
-    parser.add_argument("original_path", help="The original directory path (will become the link name).")
-    parser.add_argument("new_storage_path", help="The new directory path where data will be stored (will be the link target).")
-    parser.add_argument("--skip-validation", action="store_true", help="Skip the basic data copy validation step (if original path exists).")
-    # --force-admin-check removed for brevity, can be added back if needed.
-
+    parser.add_argument("link_path", help="The path that should become the symbolic link.")
+    parser.add_argument("data_path", help="The path where the actual data is or will be stored. This data has priority.")
+    
     args = parser.parse_args()
 
-    if platform.system().lower() == "windows" and not is_admin():
-        logging.error("Error: This script requires administrator privileges on Windows to create directory symbolic links.")
-        logging.info("Please re-run this script as an administrator.")
-        exit(1)
-
-    # 自动执行，无需人工确认
     try:
-        migrate_and_link_directory(args.original_path, args.new_storage_path, args.skip_validation)
+        align_paths_as_link_and_target(args.link_path, args.data_path)
     except Exception as e:
-        logging.error(f"An error occurred during the process: {e}")
+        logging.error(f"An unrecoverable error occurred during the process: {e}")
         logging.error("Please check the logs and the state of your directories.")
         exit(1)
